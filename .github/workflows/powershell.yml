@@ -36,3 +36,9 @@ jobs:
             }
           }
           Write-Host "Parsed $($files.Count) scripts in PowerShell 7"
+      - name: Run smoke test
+        shell: powershell
+        run: .\tests\Log-Rotator.Smoke.ps1
+      - name: Run smoke test in PowerShell 7
+        shell: pwsh
+        run: .\tests\Log-Rotator.Smoke.ps1
