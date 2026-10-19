@@ -49,20 +49,52 @@ foreach ($f in $files) {
   $rotPath = Join-Path $OutDir $rotName
 
   if ($PSCmdlet.ShouldProcess($f.FullName, "Rotate to $rotPath")) {
-    Copy-Item -LiteralPath $f.FullName -Destination $rotPath -Force
-    Clear-Content -LiteralPath $f.FullName
-    Log "Rotated: $($f.Name) -> $rotName"
+    # Never clear a source unless a verified copy or archive exists.
+    Copy-Item -LiteralPath $f.FullName -Destination $rotPath -ErrorAction Stop
+    $copiedHash = (Get-FileHash -LiteralPath $rotPath -Algorithm SHA256).Hash
+    $currentHash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+    if ($currentHash -ne $copiedHash) {
+      Log "WARN source changed during copy; retained source and copy: $($f.Name)"
+      continue
+    }
 
     if ($Compress) {
       $zipPath = Join-Path $OutDir ($rotName + ".zip")
       try {
-        Compress-Archive -LiteralPath $rotPath -DestinationPath $zipPath -Force
-        Remove-Item -LiteralPath $rotPath -Force
-        Log "Compressed: $($zipPath | Split-Path -Leaf)"
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        Compress-Archive -LiteralPath $rotPath -DestinationPath $zipPath -ErrorAction Stop
+        $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
+        try {
+          if ($zip.Entries.Count -ne 1 -or $zip.Entries[0].Length -ne $f.Length) {
+            throw 'Unexpected archive contents or length.'
+          }
+          $entryStream = $zip.Entries[0].Open()
+          $hasher = [Security.Cryptography.SHA256]::Create()
+          try {
+            $archiveHash = [BitConverter]::ToString($hasher.ComputeHash($entryStream)).Replace('-','')
+          } finally {
+            $hasher.Dispose()
+            $entryStream.Dispose()
+          }
+          if ($archiveHash -ne $copiedHash) { throw 'Archive checksum mismatch.' }
+        } finally {
+          $zip.Dispose()
+        }
+        Remove-Item -LiteralPath $rotPath -Force -ErrorAction Stop
+        Log "Verified archive: $($zipPath | Split-Path -Leaf)"
       } catch {
-        Log "WARN compress failed: $($_.Exception.Message)"
+        Log "WARN compression/verification failed; original and copy retained: $($_.Exception.Message)"
+        continue
       }
     }
+
+    # Detect intervening writes; live logs that change during rotation are left intact.
+    if ((Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash -ne $copiedHash) {
+      Log "WARN source changed during rotation; original retained: $($f.Name)"
+      continue
+    }
+    Clear-Content -LiteralPath $f.FullName -ErrorAction Stop
+    Log "Rotated: $($f.Name) -> $rotName"
   }
 }
 
